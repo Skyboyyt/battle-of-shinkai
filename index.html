@@ -3,9 +3,17 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>Unity Web Player | battleofshinkai</title>
+    <title>battleofshinkai</title>
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
     <link rel="stylesheet" href="TemplateData/style.css">
+    <!-- Battle of Shinkai: installable as a full-screen, landscape web app ("Add to Home Screen"). -->
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#0b0a18">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Shinkai">
+    <link rel="apple-touch-icon" href="TemplateData/icon-192.png">
   </head>
   <body>
     <div id="unity-container" class="unity-desktop">
@@ -27,6 +35,21 @@
         <div id="unity-build-title">battleofshinkai</div>
       </div>
     </div>
+
+    <!-- Phones only (shown by the script below). -->
+    <div id="shinkai-start" class="shinkai-overlay">
+      <div class="shinkai-title">BATTLE OF SHINKAI</div>
+      <button id="shinkai-start-button" class="shinkai-start-button" type="button">TAP TO PLAY</button>
+      <div class="shinkai-progress"><div id="shinkai-progress-fill"></div></div>
+      <div id="shinkai-start-hint" class="shinkai-hint">Plays full screen in landscape.</div>
+    </div>
+    <div id="shinkai-rotate" class="shinkai-overlay">
+      <div class="shinkai-phone"></div>
+      <div class="shinkai-title">ROTATE YOUR PHONE</div>
+      <div class="shinkai-hint">Battle of Shinkai plays in landscape.</div>
+    </div>
+    <button id="shinkai-fullscreen" type="button">&#x26F6; FULL SCREEN</button>
+
     <script>
       let canvas = document.querySelector("#unity-canvas");
       let fullscreenContainer = document.querySelector("#unity-fullscreen-container");
@@ -34,9 +57,6 @@
       // Shows a temporary message banner/ribbon for a few seconds, or
       // a permanent error message on top of the canvas if type=='error'.
       // If type=='warning', a yellow highlight color is used.
-      // Modify or remove this function to customize the visually presented
-      // way that non-critical warnings and error messages are presented to the
-      // user.
       function unityShowBanner(msg, type) {
         var warningBanner = document.querySelector("#unity-warning");
         function updateBannerVisibility() {
@@ -64,53 +84,79 @@
         frameworkUrl: buildUrl + "/WebGL-GitHubPages.framework.js.unityweb",
         codeUrl: buildUrl + "/WebGL-GitHubPages.wasm.unityweb",
         streamingAssetsUrl: "StreamingAssets",
-
-        // If you have a custom web site structure, or want to place multiple Unity build instances on the same page,
-        // you can pass fullscreenElementID: "my-unity-fullscreen-container-id", in this configuration field to
-        // explicitly point to the element tree root that is displayed in fullscreen mode.
         fullscreenElementID: "unity-fullscreen-container",
-
         companyName: "DefaultCompany",
         productName: "battleofshinkai",
         productVersion: "0.1.0",
         showBanner: unityShowBanner,
-        // errorHandler: function(err, url, line) {
-        //    alert("error " + err + " occurred at line " + line);
-        //    // Return 'true' if you handled this error and don't want Unity
-        //    // to process it further, 'false' otherwise.
-        //    return true;
-        // },
       };
 
-      // By default, Unity keeps WebGL canvas render target size matched with
-      // the DOM size of the canvas element (scaled by window.devicePixelRatio)
-      // Set this to false if you want to decouple this synchronization from
-      // happening inside the engine, and you would instead like to size up
-      // the canvas DOM size and WebGL render target sizes yourself.
-      // config.matchWebGLToCanvasSize = false;
+      // ---------------------------------------------------------------- Battle of Shinkai: phones
+      // Browsers only allow full screen and orientation lock from a user tap, so phones get a "TAP TO PLAY" screen
+      // while the game loads behind it; the tap enters full screen and locks landscape where supported (Android
+      // Chrome). iPhone Safari supports neither for web pages: a "rotate your phone" screen covers portrait instead,
+      // and "Add to Home Screen" (manifest.webmanifest) runs it full screen in landscape.
+      var isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+      var startOverlay = document.querySelector("#shinkai-start");
+      var rotateOverlay = document.querySelector("#shinkai-rotate");
+      var fullscreenButton = document.querySelector("#shinkai-fullscreen");
+      var progressFill = document.querySelector("#shinkai-progress-fill");
+      var standalone = window.matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches || navigator.standalone === true;
+      var root = document.documentElement;
+      var canFullscreen = !!(root.requestFullscreen || root.webkitRequestFullscreen);
+      var canLock = !!(screen.orientation && screen.orientation.lock);
+      var started = false;
 
-      // If you would like all file writes inside Unity Application.persistentDataPath
-      // directory to automatically persist so that the contents are remembered when
-      // the user revisits the site the next time, uncomment the following line:
-      // config.autoSyncPersistentDataPath = true;
-      // This autosyncing is currently not the default behavior to avoid regressing
-      // existing user projects that might rely on the earlier manual
-      // JS_FileSystem_Sync() behavior, but in future Unity version, this will be
-      // expected to change.
+      function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
 
-      if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
-        // Mobile device style: fill the whole browser client area with the game canvas:
+      function enterFullscreenLandscape() {
+        var request = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" })
+                    : root.webkitRequestFullscreen ? root.webkitRequestFullscreen() : null;
+        var lockLandscape = function() {
+          if (screen.orientation && screen.orientation.lock) screen.orientation.lock("landscape").catch(function() {});
+        };
+        if (request && request.then) request.then(lockLandscape).catch(function() {}); else lockLandscape();
+      }
 
+      function updateOverlays() {
+        if (!isMobile) return;
+        var portrait = window.innerHeight > window.innerWidth;
+        // Before the first tap on Android the tap itself turns the game to landscape, so the start screen stays up.
+        var tapWillRotate = !started && canFullscreen && canLock;
+        rotateOverlay.classList.toggle("visible", portrait && !tapWillRotate);
+        fullscreenButton.style.display = started && canFullscreen && !standalone && !isFullscreen() && !portrait ? "block" : "none";
+      }
+
+      if (isMobile) {
         var meta = document.createElement('meta');
         meta.name = 'viewport';
-        meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+        meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes, viewport-fit=cover';
         document.getElementsByTagName('head')[0].appendChild(meta);
         document.querySelector("#unity-container").className = "unity-mobile";
         canvas.className = "unity-mobile";
 
-        // To lower canvas resolution on mobile devices to gain some
-        // performance, uncomment the following line:
-        config.devicePixelRatio = Math.min(window.devicePixelRatio || 1, 1.5); // Battle of Shinkai phone test: cap pixel density
+        // Phone GPU cost: render at most 1.5x device pixels (2-3x phones would otherwise draw 4-9x the pixels).
+        config.devicePixelRatio = Math.min(window.devicePixelRatio || 1, 1.5);
+
+        if (standalone) {
+          started = true; // launched from the home screen: already full screen, orientation from the manifest
+        } else {
+          if (!canFullscreen) document.querySelector("#shinkai-start-hint").textContent =
+            "Tip: Share → Add to Home Screen plays full screen.";
+          startOverlay.classList.add("visible");
+          document.querySelector("#shinkai-start-button").addEventListener("click", function() {
+            started = true;
+            startOverlay.classList.remove("visible");
+            if (canFullscreen) enterFullscreenLandscape();
+            updateOverlays();
+          });
+        }
+        fullscreenButton.addEventListener("click", enterFullscreenLandscape);
+        window.addEventListener("resize", updateOverlays);
+        window.addEventListener("orientationchange", updateOverlays);
+        document.addEventListener("fullscreenchange", updateOverlays);
+        document.addEventListener("webkitfullscreenchange", updateOverlays);
+        updateOverlays();
 
 
       } else {
@@ -127,6 +173,7 @@
         const progressBarFull = document.querySelector("#unity-progress-bar-full");
 
         createUnityInstance(canvas, config, (progress) => {
+          if (progressFill) progressFill.style.width = 100 * progress + "%";
           if (progress < 1) {
             loadingContainer.style.display = "block";
             progressBarFull.style.width = 100 * progress + "%";
@@ -137,7 +184,6 @@
                 document.querySelector("#unity-fullscreen-button").onclick = () => {
                   unityInstance.SetFullscreen(1);
                 };
-
               }).catch((message) => {
                 alert(message);
               });

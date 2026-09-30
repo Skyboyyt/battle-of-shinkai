@@ -16,3 +16,22 @@ body { padding: 0; margin: 0 }
 #unity-build-title { float: right; margin-right: 10px; line-height: 38px; font-family: arial; font-size: 18px }
 #unity-fullscreen-button { cursor:pointer; float: right; width: 38px; height: 38px; background: url('fullscreen-button.png') no-repeat center }
 #unity-warning { position: absolute; left: 50%; top: 5%; transform: translate(-50%); background: white; padding: 10px; display: none }
+
+/* ---- Battle of Shinkai phone additions (full screen, landscape, rotate prompt) ---- */
+html, body { background: #0b0a18; overscroll-behavior: none; }
+.unity-mobile, .unity-mobile #unity-canvas { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+.shinkai-overlay { position: fixed; inset: 0; z-index: 20; display: none; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  background: radial-gradient(circle at 50% 40%, #2a1d4a 0%, #0b0a18 70%); color: #fff; font-family: Arial, sans-serif; text-align: center; }
+.shinkai-overlay.visible { display: flex; }
+.shinkai-title { font-size: 26px; font-weight: bold; letter-spacing: 3px; color: #ff8fd0; text-shadow: 0 0 12px rgba(255, 90, 190, .6); }
+.shinkai-start-button { font-size: 22px; font-weight: bold; letter-spacing: 2px; padding: 14px 42px; border-radius: 10px; border: 0;
+  color: #fff; background: #e0564a; box-shadow: 0 0 18px rgba(224, 86, 74, .6); }
+.shinkai-hint { font-size: 13px; opacity: .75; max-width: 80vw; line-height: 1.4; }
+.shinkai-progress { width: 60vw; max-width: 320px; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, .15); overflow: hidden; }
+.shinkai-progress > div { width: 0%; height: 100%; background: #37d6f0; transition: width .2s; }
+.shinkai-phone { width: 46px; height: 80px; border: 4px solid #fff; border-radius: 9px; animation: shinkai-rotate 1.8s ease-in-out infinite; }
+@keyframes shinkai-rotate { 0%, 20% { transform: rotate(0deg); } 60%, 100% { transform: rotate(-90deg); } }
+#shinkai-rotate { z-index: 30; }
+#shinkai-fullscreen { position: fixed; z-index: 15; top: calc(6px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%);
+  display: none; padding: 6px 12px; border: 0; border-radius: 14px; font: bold 12px Arial, sans-serif; color: #fff; background: rgba(0, 0, 0, .45); }
