@@ -3,7 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-    <title>battleofshinkai</title>
+    <!-- Shown by wallet apps (Phantom / Solflare read app_url = this page) when the player approves a connection. -->
+    <title>Battle of Shinkai</title>
+    <meta name="description" content="Battle of Shinkai: an AxoRonin samurai battle game. Connecting a wallet is optional and read-only.">
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
     <link rel="stylesheet" href="TemplateData/style.css">
     <!-- Battle of Shinkai: installable as a full-screen, landscape web app ("Add to Home Screen"). -->
@@ -50,6 +52,9 @@
     </div>
     <button id="shinkai-fullscreen" type="button">&#x26F6; FULL SCREEN</button>
 
+    <!-- Phase 14 follow-up: phones connect Phantom / Solflare through the wallet APP and come back to this page; runs
+         before the game so a wallet's answer is read (and removed from the address bar) right away. -->
+    <script src="TemplateData/shinkai-wallet-link.js"></script>
     <script>
       let canvas = document.querySelector("#unity-canvas");
       let fullscreenContainer = document.querySelector("#unity-fullscreen-container");
