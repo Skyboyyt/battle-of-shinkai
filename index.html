@@ -194,7 +194,9 @@
               });
             };
 
-      document.body.appendChild(script);
+      // Phase 15: the tab between the two wallet-app trips (connect → sign in) never needs the game, so it is not loaded.
+      if (window.ShinkaiWalletLink && window.ShinkaiWalletLink.isGameHeld()) window.ShinkaiWalletLink.whenGameAllowed(function () { document.body.appendChild(script); });
+      else document.body.appendChild(script);
 
     </script>
   </body>
