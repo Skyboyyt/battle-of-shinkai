@@ -21,24 +21,22 @@
     <div id="unity-container" class="unity-desktop">
       <div id="unity-fullscreen-container">
         <canvas id="unity-canvas" width="960" height="600" tabindex="-1"></canvas>
+        <!-- Loading screen (desktop; phones show #shinkai-start instead). The game's own look, no Unity branding. -->
         <div id="unity-loading-container">
           <div id="unity-loading-bar">
-            <div id="unity-logo"></div>
-            <div id="unity-progress-bar-empty">
-              <div id="unity-progress-bar-full"></div>
-            </div>
+            <div class="shinkai-title">BATTLE OF SHINKAI</div>
+            <div class="shinkai-progress"><div id="unity-progress-bar-full"></div></div>
+            <div class="shinkai-hint">Loading…</div>
           </div>
         </div>
       </div>
       <div id="unity-warning"> </div>
       <div id="unity-footer">
-        <div id="unity-logo-title-footer"></div>
-        <div id="unity-fullscreen-button"></div>
-        <div id="unity-build-title">battleofshinkai</div>
+        <button id="unity-fullscreen-button" class="shinkai-pill" type="button">&#x26F6; FULL SCREEN</button>
       </div>
     </div>
 
-    <!-- Phones only (shown by the script below). -->
+    <!-- Phones only (shown by the script below): start screen, then loading screen until the game is ready. -->
     <div id="shinkai-start" class="shinkai-overlay">
       <div class="shinkai-title">BATTLE OF SHINKAI</div>
       <button id="shinkai-start-button" class="shinkai-start-button" type="button">TAP TO PLAY</button>
@@ -101,8 +99,12 @@
       // while the game loads behind it; the tap enters full screen and locks landscape where supported (Android
       // Chrome). iPhone Safari supports neither for web pages: a "rotate your phone" screen covers portrait instead,
       // and "Add to Home Screen" (manifest.webmanifest) runs it full screen in landscape.
+      // After the tap (or straight away from the Home Screen) the same screen stays up as the loading screen until the
+      // game is ready, so a phone never shows a half-loaded canvas.
       var isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
       var startOverlay = document.querySelector("#shinkai-start");
+      var startButton = document.querySelector("#shinkai-start-button");
+      var startHint = document.querySelector("#shinkai-start-hint");
       var rotateOverlay = document.querySelector("#shinkai-rotate");
       var fullscreenButton = document.querySelector("#shinkai-fullscreen");
       var progressFill = document.querySelector("#shinkai-progress-fill");
@@ -111,8 +113,17 @@
       var canFullscreen = !!(root.requestFullscreen || root.webkitRequestFullscreen);
       var canLock = !!(screen.orientation && screen.orientation.lock);
       var started = false;
+      var loaded = false;
+      var failed = false;
 
       function isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+
+      function updateStartScreen() {
+        if (!isMobile) return;
+        startOverlay.classList.toggle("visible", !started || !loaded);
+        startButton.style.display = started ? "none" : "";
+        if (started && !loaded && !failed) startHint.textContent = "Loading…";
+      }
 
       function enterFullscreenLandscape() {
         var request = root.requestFullscreen ? root.requestFullscreen({ navigationUI: "hide" })
@@ -146,16 +157,15 @@
         if (standalone) {
           started = true; // launched from the home screen: already full screen, orientation from the manifest
         } else {
-          if (!canFullscreen) document.querySelector("#shinkai-start-hint").textContent =
-            "Tip: Share → Add to Home Screen plays full screen.";
-          startOverlay.classList.add("visible");
-          document.querySelector("#shinkai-start-button").addEventListener("click", function() {
+          if (!canFullscreen) startHint.textContent = "Full screen on iPhone: Share → Add to Home Screen.";
+          startButton.addEventListener("click", function() {
             started = true;
-            startOverlay.classList.remove("visible");
             if (canFullscreen) enterFullscreenLandscape();
+            updateStartScreen();
             updateOverlays();
           });
         }
+        updateStartScreen();
         fullscreenButton.addEventListener("click", enterFullscreenLandscape);
         window.addEventListener("resize", updateOverlays);
         window.addEventListener("orientationchange", updateOverlays);
@@ -184,12 +194,18 @@
             progressBarFull.style.width = 100 * progress + "%";
           } else {
             loadingContainer.style.display = "none";
+            loaded = true;
+            updateStartScreen();
           }
         }).then((unityInstance) => {
+                loaded = true;
+                updateStartScreen();
                 document.querySelector("#unity-fullscreen-button").onclick = () => {
                   unityInstance.SetFullscreen(1);
                 };
               }).catch((message) => {
+                failed = true;
+                if (isMobile) startHint.textContent = "The game could not load. Reload the page to try again.";
                 alert(message);
               });
             };

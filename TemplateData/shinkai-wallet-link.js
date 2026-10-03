@@ -235,7 +235,8 @@
   function utf8Decode(bytes) { return new TextDecoder().decode(bytes); }
 
   // ================================================================== wallet-app connection + wallet sign-in
-  // env: { location, history, localStorage, sessionStorage, document, channel, random(n), now(), fetch(url, init) }
+  // env: { location, history, localStorage, sessionStorage, document, channel, random(n), now(), fetch(url, init),
+  //        homeScreenApp (iPhone: opened from the Home Screen) }
   function createLink(env) {
     var listeners = [], queue = [], ui = null, held = false, heldWaiters = [];
 
@@ -532,6 +533,14 @@
           }
         }));
       });
+      // iPhone keeps Home Screen web apps apart from Safari and opens the wallet's answer in Safari, where the one-time
+      // key made here does not exist: say so up front instead of letting the round trip fail.
+      if (env.homeScreenApp) {
+        var warn = el(doc, 'div', 'sw-note sw-warn', 'On iPhone, the wallet answers in Safari, not in a game opened from the '
+          + 'Home Screen. To use your wallet, open the game in Safari. Guest play works here.');
+        warn.id = 'shinkai-wallet-homescreen';
+        o.card.appendChild(warn);
+      }
       o.card.appendChild(el(doc, 'div', 'sw-note', backendUrl
         ? 'Signing in proves the wallet is yours so your progress and points are saved. It is not a transaction and costs nothing. Never share your seed phrase.'
         : 'Read-only: the game only reads your public address. No transactions, never your seed phrase.'));
@@ -624,6 +633,7 @@
       '#shinkai-wallet .sw-buttons{display:flex;gap:10px;justify-content:center;margin-bottom:10px}',
       '#shinkai-wallet .sw-button{flex:1;display:block;padding:14px 8px;border-radius:10px;background:#ff6454;color:#fff;font-weight:bold;font-size:17px;text-decoration:none;letter-spacing:1px}',
       '#shinkai-wallet .sw-note{font-size:12px;color:#8fa0bb;margin:6px 0;line-height:1.3}',
+      '#shinkai-wallet .sw-warn{color:#ffcf5a;font-size:13px}',
       '#shinkai-wallet .sw-get{color:#59dbe8}',
       '#shinkai-wallet .sw-cancel{margin-top:6px;background:#15263b;color:#fff;border:0;border-radius:8px;padding:9px 22px;font-weight:bold;font-size:14px}'
     ].join('');
@@ -652,7 +662,8 @@
     channel: channel,
     random: function (n) { var b = new Uint8Array(n); global.crypto.getRandomValues(b); return b; },
     now: function () { return Date.now(); },
-    fetch: function (url, init) { return global.fetch(url, init); }
+    fetch: function (url, init) { return global.fetch(url, init); },
+    homeScreenApp: !!(global.navigator && global.navigator.standalone === true) // iOS only
   });
   link.WALLETS = WALLETS;
   global.ShinkaiWalletLink = link;
