@@ -13,6 +13,13 @@
 //  4. The wallet signs and sends the player back again; the signature goes to the server, which verifies it and returns
 //     a session. The session {token, expiry, address} is kept in localStorage (≤ 7 days, removed on sign-out). The wallet's
 //     own session token is used only for that one request and never stored afterwards.
+// Home Screen app / another browser (2026-10-08): iPhone keeps a game opened from the Home Screen apart from Safari, but the
+// wallet always answers in Safari (likewise, a phone may answer in its default browser, not the one the game runs in).
+// So each wallet trip also carries a random hand-off id (shinkai_handoff=…) in redirect_link. A page that receives an
+// answer it did not ask for (no matching one-time request here) only forwards the wallet's parameters, still encrypted,
+// to the hand-off mailbox on the multiplayer server and asks the player to switch back. The page that did ask (it holds
+// the one-time key) fetches them from the mailbox and continues as if the wallet had come back to it. The mailbox can
+// neither read nor forge an answer (NaCl box to the one-time key); each id is used once and kept 10 minutes at most.
 // Desktop wallets (extensions) sign the same server message through ShinkaiSolanaWallet.jslib (signIn below).
 // A public address is an identifier, not proof of anything: only a server-verified signature signs a player in.
 // Never: seed phrases, private keys, transactions. Nothing here is logged.
@@ -25,6 +32,10 @@
   var PENDING_TTL_MS = 10 * 60 * 1000;
   var CHANNEL = 'shinkai-wallet';
   var CALLBACK_PARAMS = ['phantom_encryption_public_key', 'solflare_encryption_public_key', 'nonce', 'data', 'errorCode', 'errorMessage'];
+  var HANDOFF_PARAM = 'shinkai_handoff';
+  var HANDOFF_ID = /^[1-9A-HJ-NP-Za-km-z]{16,32}$/;
+  var DEFAULT_RELAY = 'https://shinkai-rooms.fahadsani440.workers.dev'; // the hand-off mailbox (multiplayer/src/handoff.js)
+  var POLL_MS = 2000, SLOW_POLL_MS = 6000, FAST_POLLS = 45;           // only while a wallet answer is awaited and the page is visible
 
   var WALLETS = {
     phantom: { key: 'phantom', name: 'Phantom', connectUrl: 'https://phantom.app/ul/v1/connect', signUrl: 'https://phantom.app/ul/v1/signMessage', keyParam: 'phantom_encryption_public_key', downloadUrl: 'https://phantom.com/download' },
@@ -236,9 +247,11 @@
 
   // ================================================================== wallet-app connection + wallet sign-in
   // env: { location, history, localStorage, sessionStorage, document, channel, random(n), now(), fetch(url, init),
-  //        homeScreenApp (iPhone: opened from the Home Screen) }
+  //        homeScreenApp (iPhone: opened from the Home Screen), relayUrl (hand-off mailbox; empty = none),
+  //        timer(fn, ms), isHidden(), onVisible(fn) (optional: automatic mailbox checks) }
   function createLink(env) {
     var listeners = [], queue = [], ui = null, held = false, heldWaiters = [];
+    var relayTimer = null, relayBusy = false, relayHooked = false, polls = 0;
 
     function emit(evt) {
       if (listeners.length) listeners.forEach(function (fn) { try { fn(evt); } catch (e) {} });
@@ -252,10 +265,13 @@
     function remove(store, key) { try { if (store) store.removeItem(key); } catch (e) {} }
     function isAddress(text) { var b = base58Decode(typeof text === 'string' ? text : ''); return !!b && b.length === 32; }
 
-    // The game page itself (origin + path + any existing query), without callback parameters or fragment.
-    function pageUrl() {
+    // The game page itself (origin + path + any existing query), without callback parameters or fragment; with a hand-off
+    // id when given (the wallet's redirect_link).
+    function pageUrl(handoff) {
       var loc = env.location, params = new URLSearchParams(loc.search || '');
       CALLBACK_PARAMS.forEach(function (name) { params.delete(name); });
+      params.delete(HANDOFF_PARAM);
+      if (handoff) params.set(HANDOFF_PARAM, handoff);
       var query = params.toString();
       return loc.origin + loc.pathname + (query ? '?' + query : '');
     }
@@ -322,35 +338,53 @@
     function prepare(walletKey, backendUrl) {
       var wallet = WALLETS[walletKey];
       if (!wallet) return null;
-      var oneTimeSecret = env.random(32), publicKey = scalarMultBase(oneTimeSecret);
+      var oneTimeSecret = env.random(32), publicKey = scalarMultBase(oneTimeSecret), handoff = newHandoff();
       var pending = { v: 2, kind: 'connect', wallet: wallet.key, sk: base58Encode(oneTimeSecret), created: env.now() };
       if (backendUrl) pending.signIn = backendUrl;
+      if (handoff) pending.handoff = handoff;
       return {
         wallet: wallet,
         url: wallet.connectUrl + '?' + query([['app_url', env.location.origin + env.location.pathname], ['dapp_encryption_public_key', base58Encode(publicKey)],
-          ['redirect_link', pageUrl()], ['cluster', 'mainnet-beta']]),
+          ['redirect_link', pageUrl(handoff)], ['cluster', 'mainnet-beta']]),
         pending: pending
       };
     }
 
+    // A random id for one wallet trip (16 bytes), or '' without a hand-off mailbox.
+    function newHandoff() { return env.relayUrl ? base58Encode(env.random(16)) : ''; }
+
     // Called synchronously from the tap on a wallet link (just before the browser opens the wallet app).
-    function remember(request) { write(env.localStorage, PENDING_KEY, request.pending); }
+    function remember(request) { write(env.localStorage, PENDING_KEY, request.pending); watchRelay(); }
 
     function fail(code, walletName) { return { type: 'error', code: code, app: true, wallet: walletName || '' }; }
 
     // Reads a wallet's answer from the page address (if any) and cleans the address bar. Returns
     //   {type:'connected', ..., signStep?}  connect approved (signStep: data for the sign-in step that follows)
     //   {type:'signed', ...}                 sign-in message signed (still to be verified by the server)
-    //   {type:'error' | 'authError', ...}    or null (nothing to do)
+    //   {type:'error' | 'authError', ...}
+    //   {type:'forward', handoff, params}    an answer to a request made elsewhere (Home Screen app / other browser)
+    //   or null (nothing to do)
     function handleReturn() {
-      var loc = env.location, params = new URLSearchParams(loc.search || '');
-      var answerKey = params.has(WALLETS.phantom.keyParam) ? 'phantom' : params.has(WALLETS.solflare.keyParam) ? 'solflare' : null;
-      var isError = params.has('errorCode'), hasData = params.has('nonce') && params.has('data');
-      var pending = read(env.localStorage, PENDING_KEY);
+      var loc = env.location, search = new URLSearchParams(loc.search || ''), p = {};
+      CALLBACK_PARAMS.forEach(function (name) { var v = search.get(name); if (v) p[name] = v; });
+      var handoff = search.get(HANDOFF_PARAM) || '', pending = read(env.localStorage, PENDING_KEY);
+      var cleanAddressBar = function () { try { env.history.replaceState(null, '', pageUrl().slice(loc.origin.length) + (loc.hash || '')); } catch (e) {} };
+      if (handoff && env.relayUrl && HANDOFF_ID.test(handoff) && (p.nonce && p.data || p.errorCode) && !(pending && pending.handoff === handoff)) {
+        cleanAddressBar(); // the one-time key is not here: pass the (still encrypted) answer on
+        return { type: 'forward', handoff: handoff, params: p };
+      }
+      return settle(p, pending, cleanAddressBar);
+    }
+
+    // Opens a wallet answer (callback parameters p) with the one-time request it answers.
+    function settle(p, pending, onAnswer) {
+      var answerKey = p[WALLETS.phantom.keyParam] ? 'phantom' : p[WALLETS.solflare.keyParam] ? 'solflare' : null;
+      var isError = !!p.errorCode, hasData = !!(p.nonce && p.data);
       var signAnswer = !answerKey && (hasData || isError) && pending && pending.kind === 'sign';
       if (!answerKey && !signAnswer && !(isError && pending)) return null; // stray parameters: ignored
-      try { env.history.replaceState(null, '', pageUrl().slice(loc.origin.length) + (loc.hash || '')); } catch (e) {}
+      if (onAnswer) onAnswer();
       remove(env.localStorage, PENDING_KEY); // one-time: a second callback can never use it
+      var params = { get: function (name) { return p[name] || null; } };
       if (!pending || !WALLETS[pending.wallet]) return fail('expired');
       var wallet = WALLETS[pending.wallet];
       var expired = !(env.now() - pending.created >= 0 && env.now() - pending.created <= PENDING_TTL_MS);
@@ -423,9 +457,112 @@
       }
     }
 
+    // ---------------------------------------------------------------- hand-off mailbox (see the top of this file)
+    function relayBase() { return String(env.relayUrl || '').replace(/\/+$/, ''); }
+
+    // The one-time request this browser is waiting on, if it can be answered through the mailbox.
+    function waitingHandoff() {
+      var p = read(env.localStorage, PENDING_KEY), age = p ? env.now() - p.created : -1;
+      return p && typeof p.handoff === 'string' && HANDOFF_ID.test(p.handoff) && age >= 0 && age <= PENDING_TTL_MS ? p : null;
+    }
+
+    // Checks the mailbox every few seconds while an answer is awaited and the page is visible, and at once when the
+    // player switches back to it.
+    function watchRelay() {
+      if (!env.relayUrl || !env.timer) return;
+      if (!relayHooked && env.onVisible) { relayHooked = true; env.onVisible(function () { pollRelay(); }); }
+      polls = 0;
+      if (!relayTimer) relayTimer = env.timer(tick, POLL_MS);
+    }
+    function tick() {
+      relayTimer = null;
+      if (!waitingHandoff()) return; // answered, cancelled or expired: stop
+      if (!(env.isHidden && env.isHidden())) { polls++; pollRelay(); }
+      relayTimer = env.timer(tick, polls < FAST_POLLS ? POLL_MS : SLOW_POLL_MS);
+    }
+
+    function pollRelay() {
+      var pending = waitingHandoff();
+      if (!pending || relayBusy || !env.relayUrl) return Promise.resolve(false);
+      relayBusy = true;
+      var id = pending.handoff;
+      return env.fetch(relayBase() + '/v1/handoff/' + id, { method: 'GET', cache: 'no-store' }).then(function (res) {
+        return res.status === 200 ? res.json() : null;
+      }).then(function (json) {
+        relayBusy = false;
+        return json && json.params && typeof json.params === 'object' ? takeRelayed(id, json.params) : false;
+      }, function () { relayBusy = false; return false; });
+    }
+
+    // An answer fetched from the mailbox: exactly the checks of an answer in the address bar.
+    function takeRelayed(id, raw) {
+      var pending = read(env.localStorage, PENDING_KEY), p = {};
+      if (!pending || pending.handoff !== id) return false; // settled meanwhile (another tab)
+      CALLBACK_PARAMS.forEach(function (name) { if (typeof raw[name] === 'string' && raw[name]) p[name] = raw[name]; });
+      var result = settle(p, pending, null);
+      if (!result) return false;
+      if (result.type === 'connected') {
+        if (env.channel) { try { env.channel.postMessage({ type: 'connected', walletKey: read(env.sessionStorage, SESSION_KEY).wallet, address: result.address }); } catch (e) {} }
+        // The game runs here, so it hears about the connection now (as a tab waiting in the browser does), sign-in or not.
+        var signStep = result.signStep;
+        delete result.signStep;
+        emit(result);
+        if (signStep) beginSignStep(signStep);
+        else closeOverlay();
+        return true;
+      }
+      closeOverlay();
+      if (result.type === 'signed') {
+        var known = read(env.sessionStorage, SESSION_KEY);
+        if (!known || known.address !== result.address) {
+          write(env.sessionStorage, SESSION_KEY, { wallet: result.walletKey, address: result.address });
+          emit({ type: 'connected', wallet: result.wallet, address: result.address, via: 'app', restored: false });
+        }
+        return verify(result.backendUrl, result.challengeId, result.address, result.wallet, result.walletKey, result.signature);
+      }
+      emit(result);
+      return true;
+    }
+
+    // This page received an answer to a request made elsewhere: post it to the mailbox and send the player back. The
+    // game is not loaded here unless the player asks for it.
+    function forwardAnswer(r) {
+      var doc = env.document;
+      var playHere = function (o) {
+        o.card.appendChild(plainButton(doc, 'shinkai-wallet-playhere', 'PLAY IN THIS BROWSER INSTEAD', function () { closeOverlay(); release(); }));
+      };
+      var state = function (name) { if (ui) ui.root.setAttribute('data-state', name); };
+      var send = function () {
+        if (!overlay('ALMOST THERE', 'Passing your wallet\'s answer to the game…')) { release(); return Promise.resolve(); }
+        state('sending');
+        return env.fetch(relayBase() + '/v1/handoff/' + r.handoff, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=UTF-8' }, body: JSON.stringify({ params: r.params }) })
+          .then(function (res) { return res.status; }, function () { return 0; })
+          .then(function (status) {
+            var o;
+            if (status === 204 || status === 409) {
+              o = overlay(r.params.errorCode ? 'WALLET ANSWER SENT' : 'APPROVED ✓',
+                'Now go back to Battle of Shinkai: the app on your Home Screen (or the browser where you started). It continues there by itself. You can close this tab.');
+              state('sent');
+            } else if (status === 400) {
+              o = overlay('SOMETHING WENT WRONG', 'This wallet answer could not be used. Go back to the game and connect again.');
+              state('refused');
+            } else {
+              o = overlay('COULD NOT REACH THE GAME', 'Check your internet connection, then try again.');
+              state('failed');
+              o.buttons.appendChild(plainButton(doc, 'shinkai-wallet-resend', 'TRY AGAIN', send));
+            }
+            if (o) playHere(o);
+          });
+      };
+      return send();
+    }
+
     function start() {
       var result = handleReturn();
       var appConnection = null;
+      if (env.channel) env.channel.onmessage = function (e) { onChannelMessage(e && e.data); };
+      if (result && result.type === 'forward') { hold(); forwardAnswer(result); return; }
+      if (waitingHandoff()) watchRelay(); // e.g. the Home Screen app was reloaded while the wallet was open
       if (result && result.type === 'signed') {
         write(env.sessionStorage, SESSION_KEY, { wallet: result.walletKey, address: result.address });
         emit({ type: 'connected', wallet: result.wallet, address: result.address, via: 'app', restored: false });
@@ -444,7 +581,6 @@
           emit({ type: 'session', token: auth.token, expiresAt: auth.expiresAt, address: auth.address, wallet: auth.wallet, restored: true });
         }
       }
-      if (env.channel) env.channel.onmessage = function (e) { onChannelMessage(e && e.data); };
     }
 
     // ---------------------------------------------------------------- game loading hold (the tab between the two wallet
@@ -516,11 +652,17 @@
     }
 
     // Step 1: PHANTOM / SOLFLARE (connect). With backendUrl, step 2 (sign in) follows when the wallet sends the player back.
+    // Home Screen app (iPhone): the wallet answers in Safari, and the player switches back here themselves.
+    function comeBackText() {
+      return env.homeScreenApp && env.relayUrl ? ' Safari then opens for a moment: switch back to this app and it continues by itself.'
+        : '; you will come back here automatically.';
+    }
+
     function showChooser(backendUrl) {
-      var doc = env.document;
+      var doc = env.document, homeApp = env.homeScreenApp && env.relayUrl;
       var o = overlay(backendUrl ? 'SIGN IN WITH YOUR WALLET' : 'CONNECT WALLET',
-        backendUrl ? 'Choose your wallet app. It opens twice: first to connect, then to sign in. You come back here automatically each time.'
-          : 'Choose your wallet app. It opens, asks you to approve, then brings you back here to keep playing.');
+        backendUrl ? 'Choose your wallet app. It opens twice: first to connect, then to sign in.' + (homeApp ? '' : ' You come back here automatically each time.')
+          : 'Choose your wallet app. It opens and asks you to approve' + (homeApp ? '.' : ', then brings you back here to keep playing.'));
       if (!o) return false;
       ['phantom', 'solflare'].forEach(function (key) {
         var request = prepare(key, backendUrl);
@@ -528,16 +670,17 @@
           remember(request);
           if (ui) {
             ui.waiting = true;
-            ui.text.textContent = 'Opening ' + request.wallet.name + '… Approve the connection there; you will come back here automatically. '
+            ui.text.textContent = 'Opening ' + request.wallet.name + '… Approve the connection there' + (homeApp ? '.' : '') + comeBackText() + ' '
               + request.wallet.name + ' did not open? Install it, then tap ' + request.wallet.name.toUpperCase() + ' again.';
           }
         }));
       });
       // iPhone keeps Home Screen web apps apart from Safari and opens the wallet's answer in Safari, where the one-time
-      // key made here does not exist: say so up front instead of letting the round trip fail.
+      // key made here does not exist. With the hand-off mailbox Safari passes the answer on; without it, say so up front.
       if (env.homeScreenApp) {
-        var warn = el(doc, 'div', 'sw-note sw-warn', 'On iPhone, the wallet answers in Safari, not in a game opened from the '
-          + 'Home Screen. To use your wallet, open the game in Safari. Guest play works here.');
+        var warn = el(doc, 'div', 'sw-note sw-warn', homeApp
+          ? 'Playing from the Home Screen: after each approval your wallet opens Safari. Just switch back to this app; it picks up the answer by itself.'
+          : 'On iPhone, the wallet answers in Safari, not in a game opened from the Home Screen. To use your wallet, open the game in Safari. Guest play works here.');
         warn.id = 'shinkai-wallet-homescreen';
         o.card.appendChild(warn);
       }
@@ -565,14 +708,17 @@
       };
       api(step.backendUrl, '/v1/auth/challenge', { address: step.address }).then(function (c) {
         if (c.status !== 200 || typeof c.json.message !== 'string') throw new Error('server');
-        var nonce = env.random(24);
+        var nonce = env.random(24), handoff = newHandoff();
         var payload = boxAfter(utf8Encode(JSON.stringify({ message: base58Encode(utf8Encode(c.json.message)), session: step.session, display: 'utf8' })), nonce, base58Decode(step.shared));
-        var url = wallet.signUrl + '?' + query([['dapp_encryption_public_key', step.dappPublic], ['nonce', base58Encode(nonce)], ['redirect_link', pageUrl()], ['payload', base58Encode(payload)]]);
+        var url = wallet.signUrl + '?' + query([['dapp_encryption_public_key', step.dappPublic], ['nonce', base58Encode(nonce)], ['redirect_link', pageUrl(handoff)], ['payload', base58Encode(payload)]]);
         if (!ui) return;
         ui.text.textContent = wallet.name + ' will ask you to sign a message. It only proves this wallet is yours: it is not a transaction and costs nothing.';
         ui.buttons.appendChild(linkButton(doc, 'shinkai-wallet-sign', 'SIGN IN WITH ' + wallet.name.toUpperCase(), url, function () {
-          write(env.localStorage, PENDING_KEY, { v: 2, kind: 'sign', wallet: wallet.key, shared: step.shared, address: step.address, challengeId: c.json.challengeId, backendUrl: step.backendUrl, created: env.now() });
-          if (ui) { ui.waiting = true; ui.text.textContent = 'Opening ' + wallet.name + '… Sign the message there; you will come back here automatically.'; }
+          var pending = { v: 2, kind: 'sign', wallet: wallet.key, shared: step.shared, address: step.address, challengeId: c.json.challengeId, backendUrl: step.backendUrl, created: env.now() };
+          if (handoff) pending.handoff = handoff;
+          write(env.localStorage, PENDING_KEY, pending);
+          watchRelay();
+          if (ui) { ui.waiting = true; ui.text.textContent = 'Opening ' + wallet.name + '… Sign the message there' + (env.homeScreenApp && env.relayUrl ? '.' : '') + comeBackText(); }
         }));
         ui.card.appendChild(plainButton(doc, 'shinkai-wallet-guest', 'PLAY AS GUEST', guest));
       }).catch(function () {
@@ -609,7 +755,9 @@
       _remember: remember,
       _handleReturn: handleReturn,
       _restore: restoreAppConnection,
-      _loadAuth: loadAuth
+      _loadAuth: loadAuth,
+      _pollRelay: pollRelay,
+      _waitingHandoff: waitingHandoff
     };
   }
 
@@ -663,7 +811,17 @@
     random: function (n) { var b = new Uint8Array(n); global.crypto.getRandomValues(b); return b; },
     now: function () { return Date.now(); },
     fetch: function (url, init) { return global.fetch(url, init); },
-    homeScreenApp: !!(global.navigator && global.navigator.standalone === true) // iOS only
+    homeScreenApp: !!(global.navigator && global.navigator.standalone === true), // iOS only
+    relayUrl: typeof global.SHINKAI_HANDOFF_URL === 'string' ? global.SHINKAI_HANDOFF_URL : DEFAULT_RELAY,
+    timer: function (fn, ms) { return global.setTimeout(fn, ms); },
+    isHidden: function () { return !!(global.document && global.document.hidden); },
+    onVisible: function (fn) {
+      try {
+        global.document.addEventListener('visibilitychange', function () { if (!global.document.hidden) fn(); });
+        global.addEventListener('focus', fn);
+        global.addEventListener('pageshow', fn);
+      } catch (e) {}
+    }
   });
   link.WALLETS = WALLETS;
   global.ShinkaiWalletLink = link;
