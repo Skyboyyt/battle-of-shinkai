@@ -11,8 +11,10 @@
 //  3. Sign-in (Phase 15): this page asks the game server for its one-time sign-in message, then one tap opens
 //     /ul/v1/signMessage (payload encrypted with the connect session). This in-between tab does not load the game.
 //  4. The wallet signs and sends the player back again; the signature goes to the server, which verifies it and returns
-//     a session. The session {token, expiry, address} is kept in localStorage (≤ 7 days, removed on sign-out). The wallet's
-//     own session token is used only for that one request and never stored afterwards.
+//     a session. The session {token, expiry, address} is kept in this TAB's sessionStorage only (V1.0 Phase 7: never in
+//     localStorage; it survives a reload, not a new visit), and handed in memory to the tab that started the sign-in
+//     (BroadcastChannel, this site only). The wallet's own session token is used only for that one request and never
+//     stored afterwards.
 // Home Screen app / another browser (2026-10-08): iPhone keeps a game opened from the Home Screen apart from Safari, but the
 // wallet always answers in Safari (likewise, a phone may answer in its default browser, not the one the game runs in).
 // So each wallet trip also carries a random hand-off id (shinkai_handoff=…) in redirect_link. A page that receives an
@@ -28,7 +30,7 @@
 
   var PENDING_KEY = 'shinkai.walletapp.pending';   // localStorage: the one-time request while the wallet app is open
   var SESSION_KEY = 'shinkai.walletapp.session';   // sessionStorage: this tab's connected app wallet {wallet, address}
-  var AUTH_KEY = 'shinkai.auth';                   // localStorage: the game server's sign-in session {token, expiresAt, address, wallet}
+  var AUTH_KEY = 'shinkai.auth';                   // sessionStorage: the game server's sign-in session {token, expiresAt, address, wallet}
   var PENDING_TTL_MS = 10 * 60 * 1000;
   var CHANNEL = 'shinkai-wallet';
   var CALLBACK_PARAMS = ['phantom_encryption_public_key', 'solflare_encryption_public_key', 'nonce', 'data', 'errorCode', 'errorMessage'];
@@ -251,6 +253,7 @@
   //        timer(fn, ms), isHidden(), onVisible(fn) (optional: automatic mailbox checks) }
   function createLink(env) {
     var listeners = [], queue = [], ui = null, held = false, heldWaiters = [];
+    var signInStarted = false; // this tab opened the wallet to SIGN IN: it takes the session another tab finishes
     var relayTimer = null, relayBusy = false, relayHooked = false, polls = 0;
 
     function emit(evt) {
@@ -279,11 +282,20 @@
     function query(pairs) { return pairs.map(function (p) { return p[0] + '=' + encodeURIComponent(p[1]); }).join('&'); }
 
     // ---------------------------------------------------------------- the game server's sign-in session
-    // {token, expiresAt, address, wallet} in localStorage (this browser, ≤ 7 days; the server can end it any time).
+    // {token, expiresAt, address, wallet} in this tab's sessionStorage (≤ 7 days; the server can end it any time).
+    // V1.0 Phase 7 (brief 7.7): never in localStorage. A session an older version left there is moved into this tab once
+    // and removed from localStorage.
+    function validAuth(a) {
+      return !!a && typeof a.token === 'string' && /^[A-Za-z0-9_-]{40,64}$/.test(a.token) && a.expiresAt > env.now() && isAddress(a.address);
+    }
+
     function loadAuth() {
-      var a = read(env.localStorage, AUTH_KEY);
+      var old = read(env.localStorage, AUTH_KEY);
+      if (old) remove(env.localStorage, AUTH_KEY);
+      var a = read(env.sessionStorage, AUTH_KEY);
+      if (!a && validAuth(old)) { a = old; write(env.sessionStorage, AUTH_KEY, a); }
       if (!a) return null;
-      if (typeof a.token !== 'string' || !/^[A-Za-z0-9_-]{40,64}$/.test(a.token) || !(a.expiresAt > env.now()) || !isAddress(a.address)) { remove(env.localStorage, AUTH_KEY); return null; }
+      if (!validAuth(a)) { remove(env.sessionStorage, AUTH_KEY); return null; }
       return a;
     }
 
@@ -301,9 +313,13 @@
       return api(backendUrl, '/v1/auth/verify', { challengeId: challengeId, address: address, signature: signature }).then(function (r) {
         if (r.status !== 200 || typeof r.json.token !== 'string') { authError(r.status === 401 ? 'rejectedByServer' : 'server', walletName, r.json.message); return false; }
         var auth = { token: r.json.token, expiresAt: r.json.expiresAt, address: address, wallet: walletName };
-        write(env.localStorage, AUTH_KEY, auth);
+        write(env.sessionStorage, AUTH_KEY, auth);
+        remove(env.localStorage, AUTH_KEY);
+        signInStarted = false;
         emit({ type: 'session', token: auth.token, expiresAt: auth.expiresAt, address: address, wallet: walletName, restored: false });
-        if (env.channel) { try { env.channel.postMessage({ type: 'signedIn', address: address }); } catch (e) {} }
+        // The tab that started the sign-in (wallets usually come back in a new tab) gets the session in memory: this
+        // site's tabs only, nothing stored on the way.
+        if (env.channel) { try { env.channel.postMessage({ type: 'signedIn', address: address, auth: auth }); } catch (e) {} }
         return true;
       }, function () { authError('network', walletName); return false; });
     }
@@ -327,6 +343,7 @@
 
     function signOut(backendUrl) {
       var auth = loadAuth();
+      remove(env.sessionStorage, AUTH_KEY);
       remove(env.localStorage, AUTH_KEY);
       remove(env.sessionStorage, SESSION_KEY);
       remove(env.localStorage, PENDING_KEY);
@@ -446,9 +463,13 @@
         write(env.sessionStorage, SESSION_KEY, { wallet: message.walletKey, address: message.address });
         closeOverlay();
         emit({ type: 'connected', wallet: WALLETS[message.walletKey].name, address: message.address, via: 'app', restored: false });
-      } else if (message.type === 'signedIn' && ui && ui.waiting) {
-        var auth = loadAuth();
+      } else if (message.type === 'signedIn' && ((ui && ui.waiting) || signInStarted)) {
+        // (the 'connected' message from the in-between tab may already have closed this tab's overlay)
         if (held) { showMessage('Signed in', 'You are signed in. Continue in the new tab; you can close this one.'); return; }
+        signInStarted = false;
+        // The session comes with the message (it lives in the other tab's sessionStorage, which this tab cannot read).
+        var auth = validAuth(message.auth) && message.auth.address === message.address ? message.auth : loadAuth();
+        if (auth && auth === message.auth) write(env.sessionStorage, AUTH_KEY, { token: auth.token, expiresAt: auth.expiresAt, address: auth.address, wallet: auth.wallet });
         closeOverlay();
         if (auth) {
           emit({ type: 'connected', wallet: auth.wallet, address: auth.address, via: 'session', restored: true });
@@ -668,6 +689,7 @@
         var request = prepare(key, backendUrl);
         o.buttons.appendChild(linkButton(doc, 'shinkai-wallet-' + key, request.wallet.name.toUpperCase(), request.url, function () {
           remember(request);
+          if (backendUrl) signInStarted = true;
           if (ui) {
             ui.waiting = true;
             ui.text.textContent = 'Opening ' + request.wallet.name + '… Approve the connection there' + (homeApp ? '.' : '') + comeBackText() + ' '
@@ -689,6 +711,7 @@
         : 'Read-only: the game only reads your public address. No transactions, never your seed phrase.'));
       o.card.appendChild(getLinks(doc));
       o.card.appendChild(plainButton(doc, 'shinkai-wallet-cancel', 'CANCEL', function () {
+        signInStarted = false;
         remove(env.localStorage, PENDING_KEY);
         closeOverlay();
         emit(fail('cancelled'));
