@@ -440,7 +440,7 @@
       var address = payload && typeof payload.public_key === 'string' ? payload.public_key : '';
       if (!isAddress(address)) return fail('callbackFailed', wallet.name);
       write(env.sessionStorage, SESSION_KEY, { wallet: wallet.key, address: address });
-      var result = { type: 'connected', wallet: wallet.name, address: address, via: 'app', restored: false };
+      var result = { type: 'connected', wallet: wallet.name, walletKey: wallet.key, address: address, via: 'app', restored: false };
       // The wallet's session token is only kept (in memory, then in the one-time sign request) to ask for the sign-in
       // signature; it is never stored afterwards.
       if (pending.signIn && typeof payload.session === 'string' && payload.session.length > 0 && payload.session.length < 4096) {
@@ -523,7 +523,7 @@
       var result = settle(p, pending, null);
       if (!result) return false;
       if (result.type === 'connected') {
-        if (env.channel) { try { env.channel.postMessage({ type: 'connected', walletKey: read(env.sessionStorage, SESSION_KEY).wallet, address: result.address }); } catch (e) {} }
+        if (env.channel) { try { env.channel.postMessage({ type: 'connected', walletKey: result.walletKey, address: result.address }); } catch (e) {} }
         // The game runs here, so it hears about the connection now (as a tab waiting in the browser does), sign-in or not.
         var signStep = result.signStep;
         delete result.signStep;
@@ -589,7 +589,7 @@
         emit({ type: 'connected', wallet: result.wallet, address: result.address, via: 'app', restored: false });
         verify(result.backendUrl, result.challengeId, result.address, result.wallet, result.walletKey, result.signature);
       } else if (result && result.type === 'connected') {
-        if (env.channel) { try { env.channel.postMessage({ type: 'connected', walletKey: read(env.sessionStorage, SESSION_KEY).wallet, address: result.address }); } catch (e) {} }
+        if (env.channel) { try { env.channel.postMessage({ type: 'connected', walletKey: result.walletKey, address: result.address }); } catch (e) {} }
         if (result.signStep) { hold(); beginSignStep(result.signStep); }
         else emit(result);
       } else {

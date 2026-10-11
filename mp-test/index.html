@@ -145,6 +145,8 @@
       var portraitAllowed = false;
       try { portraitAllowed = sessionStorage.getItem("shinkai.portrait") === "1"; } catch (e) { }
       var installPrompt = null;
+      var landscapeLocked = false; // landscape really locked (a lock can be refused even in full screen)
+      var lockPending = false;     // full screen + landscape lock under way (the rotate prompt waits for the answer)
       var buttonShownAt = 0;
 
       function isFullscreen() {
@@ -155,10 +157,14 @@
         if (!canFullscreen || isFullscreen()) return;
         var request = null;
         try { request = requestFullscreenFn.call(root, { navigationUI: "hide" }); } catch (e) { request = null; }
+        var settled = function(locked) { lockPending = false; landscapeLocked = locked; updateOverlays(); };
         var lockLandscape = function() {
-          if (touchDevice && canLock) { try { screen.orientation.lock("landscape").catch(function() {}); } catch (e) { } }
+          if (!touchDevice || !canLock) { settled(false); return; }
+          try { screen.orientation.lock("landscape").then(function() { settled(true); }, function() { settled(false); }); }
+          catch (e) { settled(false); }
         };
-        if (request && request.then) request.then(lockLandscape).catch(function() { updateOverlays(); }); else setTimeout(lockLandscape, 150);
+        lockPending = touchDevice && canLock;
+        if (request && request.then) request.then(lockLandscape, function() { settled(false); }); else setTimeout(lockLandscape, 150);
       }
 
       // The CSS safe-area insets as fractions of the game canvas (left, top, right, bottom). 0 where there are none.
@@ -200,8 +206,8 @@
         var portrait = window.innerHeight > window.innerWidth;
         // Before the first tap where the tap itself turns the game to landscape, the start screen stays up.
         var tapWillRotate = !started && canFullscreen && canLock;
-        var landscapeLocked = isFullscreen() && canLock;
-        rotateOverlay.classList.toggle("visible", phone && portrait && !tapWillRotate && !landscapeLocked && !portraitAllowed && !failed);
+        if (!isFullscreen() && !lockPending) landscapeLocked = false; // leaving full screen releases the lock
+        rotateOverlay.classList.toggle("visible", phone && portrait && !tapWillRotate && !landscapeLocked && !lockPending && !portraitAllowed && !failed);
         var showButton = canFullscreen && started && !isStandalone() && !isFullscreen() && !failed;
         if (showButton && fullscreenButton.style.display !== "flex") showFullscreenButton(true);
         fullscreenButton.style.display = showButton ? "flex" : "none";
@@ -288,19 +294,19 @@
       script.src = loaderUrl;
       script.onload = () => {
         createUnityInstance(canvas, config, (progress) => {
+          // progress 1 arrives before the game has finished initialising: the start screen waits for the instance.
           if (progressFill) progressFill.style.width = 100 * progress + "%";
-          if (progress >= 1) {
-            loaded = true;
-            updateStartScreen();
-            updateOverlays();
-          }
         }).then((unityInstance) => {
           loaded = true;
           updateStartScreen();
           updateOverlays();
         }).catch((message) => {
-          fail("The game could not start in this browser: " + message + " Reload the page to try again.");
+          var text = String((message && message.message) || message || "unknown error").replace(/\s*$/, "");
+          fail("The game could not start in this browser: " + text + (/[.!?]$/.test(text) ? "" : ".") + " Reload the page to try again.");
         });
+      };
+      script.onerror = function() {
+        fail("The game could not be downloaded. Check your internet connection, then reload the page to try again.");
       };
 
       var problem = compatibilityProblem();
