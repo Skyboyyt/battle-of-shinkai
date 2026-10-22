@@ -98,6 +98,19 @@
         showBanner: unityShowBanner,
       };
 
+      // V1.0 (2026-10-23): the three big build files come from Cloudflare (the "shinkai-game" Worker, cdn/README.md). On
+      // the owner's network GitHub Pages ran at ~25–50 KB/s and a phone's first load after an update never finished;
+      // Cloudflare is ~10× faster and the browser decompresses natively. Only on the live site (github.io) or with ?cdn=1;
+      // ?cdn=0, or any failure, loads GitHub's own copy (Build/). The page, loader, wallet links and rooms are unchanged.
+      var cdnUrl = "https://shinkai-game.fahadsani440.workers.dev/build";
+      var localFiles = { dataUrl: config.dataUrl, frameworkUrl: config.frameworkUrl, codeUrl: config.codeUrl };
+      var cdnFiles = {
+        dataUrl: cdnUrl + "/WebGL-MPTest.data.unityweb",
+        frameworkUrl: cdnUrl + "/WebGL-MPTest.framework.js.unityweb",
+        codeUrl: cdnUrl + "/WebGL-MPTest.wasm.unityweb",
+      };
+      var useCdn = (/\.github\.io$/i.test(location.hostname) || /[?&]cdn=1/.test(location.search)) && !/[?&]cdn=0/.test(location.search);
+
       // ---------------------------------------------------------------- Battle of Shinkai: display (V1.0)
       // Every browser gets the same edge-to-edge page; behaviour follows what the browser CAN do (feature detection),
       // not its name:
@@ -292,7 +305,8 @@
 
       var script = document.createElement("script");
       script.src = loaderUrl;
-      script.onload = () => {
+      function startGame(files) {
+        Object.assign(config, files);
         createUnityInstance(canvas, config, (progress) => {
           // progress 1 arrives before the game has finished initialising: the start screen waits for the instance.
           if (progressFill) progressFill.style.width = 100 * progress + "%";
@@ -302,9 +316,17 @@
           updateOverlays();
         }).catch((message) => {
           var text = String((message && message.message) || message || "unknown error").replace(/\s*$/, "");
+          if (files === cdnFiles) {
+            console.warn("[Shinkai] the Cloudflare game files failed (" + text + "): loading GitHub's copy");
+            var banner = document.querySelector("#unity-warning"); // the failed attempt's error is not the player's problem
+            if (banner) { banner.innerHTML = ""; banner.style.display = "none"; }
+            startGame(localFiles);
+            return;
+          }
           fail("The game could not start in this browser: " + text + (/[.!?]$/.test(text) ? "" : ".") + " Reload the page to try again.");
         });
-      };
+      }
+      script.onload = () => startGame(useCdn ? cdnFiles : localFiles);
       script.onerror = function() {
         fail("The game could not be downloaded. Check your internet connection, then reload the page to try again.");
       };
